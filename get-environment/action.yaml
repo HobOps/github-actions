@@ -1,0 +1,31 @@
+name: 'Get environment'
+description: 'Get environment based on branch or tag name'
+inputs:
+  ref:
+    description: 'Git ref'
+    required: true
+  ref_type:
+    description: 'Git ref type'
+    required: true
+outputs:
+  environment:
+    description: 'Environment'
+    value: ${{ steps.set-env.outputs.environment }}
+runs:
+  using: "composite"
+  steps:
+    - name: Set ENV based on branch or tag
+      id: set-env
+      run: |
+        if [[ "${{ inputs.ref }}" == "refs/heads/main" ]]; then
+          ENV=prod
+        elif [[ "${{ inputs.ref }}" == "refs/heads/staging" ]]; then
+          ENV=staging
+        elif [[ "${{ inputs.ref }}" == "refs/heads/dev" ]] || [[ "${{ inputs.ref }}" == "refs/heads/develop" ]]; then
+          ENV=dev
+        else
+          ENV=preview-$(echo "${{ inputs.ref }}" | sed 's/refs\/heads\///' | sed 's/\//\-/g' | sed 's/\_/\-/g')
+        fi
+        echo "Environment: ${ENV}"
+        echo "environment=${ENV}" >> $GITHUB_OUTPUT
+      shell: bash

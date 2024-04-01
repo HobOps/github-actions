@@ -1,0 +1,43 @@
+name: 'Check if image exists in GCR by tag'
+description: 'Check if image exists in GCR by tag'
+inputs:
+  docker_repo:
+    description: 'Docker repo'
+    required: true
+  docker_image:
+    description: 'Docker image'
+    required: true
+  docker_tag:
+    description: 'Docker tag'
+    required: true
+  force_build:
+    description: "Force build"
+    required: true
+outputs:
+  run_build:
+    description: 'Runs build if image does not exist'
+    value: ${{ steps.check.outputs.run_build }}
+runs:
+  using: "composite"
+  steps:
+    - name: Check if image tag exists in GCR
+      id: check
+      run: |
+        if [[ ${{ inputs.force_build }} == 'false' ]]; then
+          existing_tags=$(\
+            gcloud container images list-tags \
+            --filter="tags:${{ github.sha }}" \
+            --format=json ${{ inputs.docker_repo }}/${{ inputs.docker_image }} \
+          )
+          if [[ "$existing_tags" == "[]" ]]; then
+            echo "tag does not exist, running build"
+            echo "run_build=${{ true }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag exists, skipping build"
+            echo "run_build=${{ false }}" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "Force build, skipping validation and running build"
+          echo "run_build=${{ true }}" >> $GITHUB_OUTPUT
+        fi
+      shell: bash

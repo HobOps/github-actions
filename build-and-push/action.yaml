@@ -1,0 +1,59 @@
+name: 'Build and push to GCR'
+description: 'Build and push to GCR'
+inputs:
+  environment:
+    description: 'Environment'
+    required: true
+    default: 'dev'
+  docker_repo:
+    description: 'Docker repo'
+    required: true
+  docker_image:
+    description: 'Docker image'
+    required: true
+  docker_file:
+    description: 'Docker file'
+    required: true
+  docker_build_context:
+    description: 'Docker build context'
+    required: true
+outputs:
+  tag:
+    description: 'Docker image tag with git commit hash'
+    value: ${{ steps.set-outputs.outputs.tag }}
+  tag_latest:
+    description: 'Docker image tag with latest'
+    value: ${{ steps.set-outputs.outputs.tag_latest }}
+runs:
+  using: "composite"
+  steps:
+    - name: Get short commit hash
+      id: short-sha
+      run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      shell: bash
+    - name: Build docker image
+      run: |
+        export DOCKER_BUILDKIT=0
+        docker build \
+          --tag ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:${{ github.sha }} \
+          --tag ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:${{ inputs.environment }}-${{ steps.short-sha.outputs.sha_short }} \
+          --tag ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:${{ inputs.environment }}-latest \
+          --file ${{ inputs.docker_file }} \
+          ${{ inputs.docker_build_context }}
+      shell: bash
+    - name: Push docker image
+      run: |
+        docker push ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:cache-${{ steps.set-cache-scope.outputs.cache-scope }}
+      shell: bash
+    - name: Push docker image (release stage)
+      run: |
+        docker push ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:${{ github.sha }}
+        docker push ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:${{ inputs.environment }}-${{ steps.short-sha.outputs.sha_short }}
+        docker push ${{ inputs.docker_repo }}/${{ inputs.docker_image }}:${{ inputs.environment }}-latest
+      shell: bash
+    - name: Set outputs
+      id: set-outputs
+      run: |
+        echo "tag=${{ inputs.environment }}-${{ steps.short-sha.outputs.sha_short }}" >> $GITHUB_OUTPUT
+        echo "tag_latest=${{ inputs.environment }}-latest" >> $GITHUB_OUTPUT
+      shell: bash
