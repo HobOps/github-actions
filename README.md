@@ -18,7 +18,7 @@ Full CI/release pipeline for Terraform module repositories
 | `release` | push to main | Compute next semver tag from conventional commits and publish a GitHub Release |
 
 The caller repo keeps its own config files: `.tflint.hcl`, `.checkov.yaml`
-and `commitlint.config.js`.
+and `commitlint.config.mjs` (commitlint-github-action v6 requires `.mjs`).
 
 Usage (`.github/workflows/ci.yml` in the caller repo):
 
@@ -43,6 +43,7 @@ jobs:
     uses: HobOps/github-actions/.github/workflows/terraform-module-ci.yml@v1
     permissions:
       contents: write # release job pushes tags / creates releases
+      pull-requests: read # commitlint lists the PR commits
 ```
 
 Inputs (all optional):
@@ -52,7 +53,7 @@ Inputs (all optional):
 | `terraform_version` | `1.9.8` | Terraform version for fmt/validate |
 | `tflint_version` | `latest` | TFLint version |
 | `checkov_config_file` | `.checkov.yaml` | Checkov config in the caller repo |
-| `commitlint_config_file` | `commitlint.config.js` | commitlint config in the caller repo |
+| `commitlint_config_file` | `commitlint.config.mjs` | commitlint config in the caller repo |
 | `branch_name_pattern` | `^((feat\|fix)/.+\|revert-[0-9]+-.+)$` | Allowed PR branch names |
 | `default_bump` | `patch` | Bump when no conventional-commit keyword is found |
 | `tag_prefix` | `v` | Release tag prefix |
