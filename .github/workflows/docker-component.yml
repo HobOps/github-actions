@@ -1,0 +1,238 @@
+name: Docker Component
+
+# Reusable workflow to build (and optionally push to GCR) a single Docker
+# component. In a monorepo, call this workflow once per component
+# (frontend, backend, worker, ...). Path filters and matrix scheduling stay
+# in the caller so only the components that changed run.
+#
+# Relies on the composite actions in this repository:
+# gcr-login, get-environment, check-if-image-exists-in-gcr, build-and-push.
+#
+# The caller job must pass `secrets.gcp_credentials_json` when `push: true`.
+
+on:
+  workflow_call:
+    inputs:
+      context:
+        description: Docker build context path (relative to the caller repo root)
+        type: string
+        required: true
+      dockerfile:
+        description: >
+          Dockerfile path relative to the caller repo root.
+          Leave empty to use <context>/Dockerfile.
+        type: string
+        required: false
+        default: ""
+      image_name:
+        description: Image name without registry prefix (e.g. my-app-backend)
+        type: string
+        required: true
+      docker_repo:
+        description: Container registry path (e.g. gcr.io/my-project)
+        type: string
+        required: true
+      push:
+        description: Push the image to the registry (false = build-only, useful on PRs)
+        type: boolean
+        required: false
+        default: true
+      force_build:
+        description: Build even if the git-sha tag already exists in GCR
+        type: boolean
+        required: false
+        default: false
+      environment:
+        description: >
+          Environment name used in image tags (prod, staging, dev, ...).
+          Leave empty to derive it from the git ref via get-environment.
+        type: string
+        required: false
+        default: ""
+    secrets:
+      gcp_credentials_json:
+        description: GCP service account JSON for GCR auth (required when push is true)
+        required: false
+    outputs:
+      environment:
+        description: Environment used for tagging
+        value: ${{ jobs.docker.outputs.environment }}
+      tag:
+        description: Primary image tag (${environment}-${short_sha})
+        value: ${{ jobs.docker.outputs.tag }}
+      tag_latest:
+        description: Rolling latest tag for the environment
+        value: ${{ jobs.docker.outputs.tag_latest }}
+      image:
+        description: Fully qualified image reference without tag
+        value: ${{ jobs.docker.outputs.image }}
+      built:
+        description: Whether a new image was built in this run
+        value: ${{ jobs.docker.outputs.built }}
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      environment: ${{ steps.resolve-env.outputs.environment }}
+      tag: ${{ steps.result.outputs.tag }}
+      tag_latest: ${{ steps.result.outputs.tag_latest }}
+      image: ${{ steps.result.outputs.image }}
+      built: ${{ steps.result.outputs.built }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve paths
+        id: paths
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          set -euo pipefail
+          context="${CONTEXT}"
+          dockerfile="${DOCKERFILE}"
+          if [[ -z "${dockerfile}" ]]; then
+            dockerfile="${context%/}/Dockerfile"
+          fi
+          if [[ ! -d "${context}" ]]; then
+            echo "Build context not found: ${context}" >&2
+            exit 1
+          fi
+          if [[ ! -f "${dockerfile}" ]]; then
+            echo "Dockerfile not found: ${dockerfile}" >&2
+            exit 1
+          fi
+          echo "context=${context}" >> "${GITHUB_OUTPUT}"
+          echo "dockerfile=${dockerfile}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve environment from git ref
+        if: inputs.environment == ''
+        id: get-environment
+        uses: HobOps/github-actions/get-environment@v1
+        with:
+          ref: ${{ github.ref }}
+          ref_type: ${{ github.ref_type }}
+
+      - name: Resolve environment
+        id: resolve-env
+        env:
+          INPUT_ENV: ${{ inputs.environment }}
+          DERIVED_ENV: ${{ steps.get-environment.outputs.environment }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_ENV}" ]]; then
+            echo "environment=${INPUT_ENV}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "environment=${DERIVED_ENV}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Set image coordinates
+        id: coords
+        env:
+          DOCKER_REPO: ${{ inputs.docker_repo }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+        run: |
+          set -euo pipefail
+          echo "image=${DOCKER_REPO%/}/${IMAGE_NAME}" >> "${GITHUB_OUTPUT}"
+
+      # -----------------------------------------------------------------------
+      # Build-only path (typical for pull_request): no registry credentials
+      # -----------------------------------------------------------------------
+      - name: Build image (no push)
+        if: ${{ !inputs.push }}
+        id: build-only
+        env:
+          IMAGE: ${{ steps.coords.outputs.image }}
+          ENVIRONMENT: ${{ steps.resolve-env.outputs.environment }}
+          DOCKERFILE: ${{ steps.paths.outputs.dockerfile }}
+          CONTEXT: ${{ steps.paths.outputs.context }}
+        run: |
+          set -euo pipefail
+          sha_short="$(git rev-parse --short HEAD)"
+          tag="${ENVIRONMENT}-${sha_short}"
+          tag_latest="${ENVIRONMENT}-latest"
+          docker build \
+            --tag "${IMAGE}:${GITHUB_SHA}" \
+            --tag "${IMAGE}:${tag}" \
+            --tag "${IMAGE}:${tag_latest}" \
+            --file "${DOCKERFILE}" \
+            "${CONTEXT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "tag_latest=${tag_latest}" >> "${GITHUB_OUTPUT}"
+          echo "built=true" >> "${GITHUB_OUTPUT}"
+
+      # -----------------------------------------------------------------------
+      # Push path: GCR login → skip if tag exists → build-and-push
+      # -----------------------------------------------------------------------
+      - name: Require GCP credentials when pushing
+        if: inputs.push
+        env:
+          CREDS: ${{ secrets.gcp_credentials_json }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CREDS}" ]]; then
+            echo "secrets.gcp_credentials_json is required when push is true" >&2
+            exit 1
+          fi
+
+      - name: GCR login
+        if: inputs.push
+        uses: HobOps/github-actions/gcr-login@v1
+        with:
+          credentials_json: ${{ secrets.gcp_credentials_json }}
+
+      - name: Check if image tag exists in GCR
+        if: inputs.push
+        id: check-image
+        uses: HobOps/github-actions/check-if-image-exists-in-gcr@v1
+        with:
+          docker_repo: ${{ inputs.docker_repo }}
+          docker_image: ${{ inputs.image_name }}
+          docker_tag: ${{ github.sha }}
+          force_build: ${{ inputs.force_build }}
+
+      - name: Build and push to GCR
+        if: inputs.push && steps.check-image.outputs.run_build == 'true'
+        id: build-and-push
+        uses: HobOps/github-actions/build-and-push@v1
+        with:
+          environment: ${{ steps.resolve-env.outputs.environment }}
+          docker_repo: ${{ inputs.docker_repo }}
+          docker_image: ${{ inputs.image_name }}
+          docker_file: ${{ steps.paths.outputs.dockerfile }}
+          docker_build_context: ${{ steps.paths.outputs.context }}
+
+      - name: Collect outputs
+        id: result
+        env:
+          PUSH: ${{ inputs.push }}
+          IMAGE: ${{ steps.coords.outputs.image }}
+          ENVIRONMENT: ${{ steps.resolve-env.outputs.environment }}
+          BUILD_ONLY_TAG: ${{ steps.build-only.outputs.tag }}
+          BUILD_ONLY_TAG_LATEST: ${{ steps.build-only.outputs.tag_latest }}
+          BUILD_ONLY_BUILT: ${{ steps.build-only.outputs.built }}
+          RUN_BUILD: ${{ steps.check-image.outputs.run_build }}
+          PUSHED_TAG: ${{ steps.build-and-push.outputs.tag }}
+          PUSHED_TAG_LATEST: ${{ steps.build-and-push.outputs.tag_latest }}
+        run: |
+          set -euo pipefail
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+          if [[ "${PUSH}" == "true" ]]; then
+            if [[ "${RUN_BUILD}" == "true" ]]; then
+              echo "tag=${PUSHED_TAG}" >> "${GITHUB_OUTPUT}"
+              echo "tag_latest=${PUSHED_TAG_LATEST}" >> "${GITHUB_OUTPUT}"
+              echo "built=true" >> "${GITHUB_OUTPUT}"
+            else
+              sha_short="$(git rev-parse --short HEAD)"
+              echo "tag=${ENVIRONMENT}-${sha_short}" >> "${GITHUB_OUTPUT}"
+              echo "tag_latest=${ENVIRONMENT}-latest" >> "${GITHUB_OUTPUT}"
+              echo "built=false" >> "${GITHUB_OUTPUT}"
+            fi
+          else
+            echo "tag=${BUILD_ONLY_TAG}" >> "${GITHUB_OUTPUT}"
+            echo "tag_latest=${BUILD_ONLY_TAG_LATEST}" >> "${GITHUB_OUTPUT}"
+            echo "built=${BUILD_ONLY_BUILT}" >> "${GITHUB_OUTPUT}"
+          fi

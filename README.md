@@ -59,6 +59,98 @@ Inputs (all optional):
 | `tag_prefix` | `v` | Release tag prefix |
 | `release_branches` | `main` | Branches that produce releases |
 
+### `docker-component.yml`
+
+Build (and optionally push to GCR) a **single** Docker component. In a
+monorepo, call this workflow once per component (`frontend`, `backend`, …).
+Path filters / change detection stay in the caller so only changed components
+run.
+
+| Mode | When | Purpose |
+|------|------|---------|
+| Build-only | `push: false` (typical on PRs) | `docker build` with env + sha tags; no registry credentials needed |
+| Push | `push: true` | GCR login → skip if `:github.sha` already exists → build + push |
+
+Tags written on push (via the `build-and-push` composite action):
+
+- `${docker_repo}/${image_name}:${github.sha}`
+- `${docker_repo}/${image_name}:${environment}-${short_sha}`
+- `${docker_repo}/${image_name}:${environment}-latest`
+
+Usage (`.github/workflows/docker.yml` in a monorepo such as `docker-example-app`):
+
+```yaml
+name: Docker
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, staging, develop]
+
+concurrency:
+  group: docker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    uses: HobOps/github-actions/.github/workflows/docker-component.yml@v1
+    with:
+      context: ./backend
+      image_name: docker-example-app-backend
+      docker_repo: ${{ vars.DOCKER_REPO }}
+      # Build on PRs; push only after merge / branch pushes
+      push: ${{ github.event_name == 'push' }}
+    secrets:
+      gcp_credentials_json: ${{ secrets.GCR_PUSH_KEY }}
+
+  frontend:
+    uses: HobOps/github-actions/.github/workflows/docker-component.yml@v1
+    with:
+      context: ./frontend
+      image_name: docker-example-app-frontend
+      docker_repo: ${{ vars.DOCKER_REPO }}
+      push: ${{ github.event_name == 'push' }}
+    secrets:
+      gcp_credentials_json: ${{ secrets.GCR_PUSH_KEY }}
+```
+
+Optional path filters in the caller (only build what changed):
+
+```yaml
+on:
+  pull_request:
+    paths: [backend/**, frontend/**, .github/workflows/docker.yml]
+  push:
+    paths: [backend/**, frontend/**, .github/workflows/docker.yml]
+```
+
+For finer control, add a `dorny/paths-filter` job and gate each component
+with `needs` + `if: needs.changes.outputs.backend == 'true'`.
+
+Inputs:
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `context` | yes | — | Docker build context path |
+| `dockerfile` | no | `<context>/Dockerfile` | Dockerfile path |
+| `image_name` | yes | — | Image name without registry prefix |
+| `docker_repo` | yes | — | Registry path (`gcr.io/my-project`) |
+| `push` | no | `true` | Push to registry (`false` = build-only) |
+| `force_build` | no | `false` | Rebuild even if `:github.sha` exists in GCR |
+| `environment` | no | *(from ref)* | Tag environment; empty → `get-environment` |
+
+Secrets:
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `gcp_credentials_json` | when `push: true` | GCP SA JSON for GCR |
+
+Outputs: `environment`, `tag`, `tag_latest`, `image`, `built`.
+
 ## Composite actions
 
 | Action | Purpose |
